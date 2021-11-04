@@ -12,8 +12,10 @@ import zigpy.device
 import zigpy.endpoint
 import zigpy.exceptions
 import zigpy.neighbor
+import zigpy.state
 import zigpy.types
 import zigpy.util
+import zigpy.zdo.types
 
 from zigpy_deconz import types as t
 from zigpy_deconz.api import Deconz, NetworkParameter, NetworkState, Status
@@ -59,6 +61,66 @@ class ControllerApplication(zigpy.application.ControllerApplication):
         """Shutdown application."""
         self._api.close()
 
+    async def load_network_info(self, *, load_devices=False):
+        network_info = zigpy.state.NetworkInformation()
+
+        # TODO: figure out how the override is chosen
+        (network_info.extended_pan_id,) = await self._api[
+            NetworkParameter.nwk_extended_panid
+        ]
+        (network_info.extended_pan_id,) = await self._api[
+            NetworkParameter.aps_extended_panid
+        ]
+
+        (network_info.pan_id,) = await self._api[NetworkParameter.nwk_panid]
+        (network_info.nwk_update_id,) = await self._api[NetworkParameter.nwk_update_id]
+        (network_info.channel,) = await self._api[NetworkParameter.current_channel]
+        (network_info.channel_mask,) = await self._api[NetworkParameter.channel_mask]
+
+        # TODO: figure out `security_mode`
+        await self._api[NetworkParameter.security_mode]
+        network_info.security_level = None
+
+        network_info.network_key = zigpy.state.Key()
+        _, network_info.network_key.key = await self._api.read_parameter(
+            NetworkParameter.network_key, 0
+        )
+        network_info.network_key.seq = 0
+
+        try:
+            (network_info.network_key.tx_counter,) = await self._api[
+                NetworkParameter.nwk_frame_counter
+            ]
+        except zigpy_deconz.exception.CommandError as ex:
+            assert ex.status == Status.UNSUPPORTED
+            network_info.network_key.tx_counter = None
+
+        network_info.network_key.rx_counter = None
+        network_info.network_key.partner_ieee = None
+
+        (tc_addr,) = await self._api[NetworkParameter.trust_center_address]
+        _, network_info.tc_link_key = await self._api.read_parameter(
+            NetworkParameter.link_key, tc_addr
+        )
+
+        node_info = zigpy.state.NodeInfo()
+
+        (node_info.ieee,) = await self._api[NetworkParameter.mac_address]
+        (node_info.nwk,) = await self._api[NetworkParameter.nwk_address]
+
+        (designed_coord,) = await self._api[NetworkParameter.aps_designed_coordinator]
+
+        if designed_coord == 0x01:
+            node_info.logical_type = zigpy.zdo.types.LogicalType.Coordinator
+        else:
+            node_info.logical_type = zigpy.zdo.types.LogicalType.Router
+
+        LOGGER.debug("Loaded network info: %s", network_info)
+        LOGGER.debug("Loaded node info: %s", node_info)
+
+        self.state.network_information = network_info
+        self.state.node_information = node_info
+
     async def startup(self, auto_form=False):
         """Perform a complete application startup."""
         self._api = Deconz(self, self._config[zigpy.config.CONF_DEVICE])
@@ -79,16 +141,8 @@ class ControllerApplication(zigpy.application.ControllerApplication):
         if auto_form and should_form:
             await self.form_network()
 
-        (self._pan_id,) = await self._api[NetworkParameter.nwk_panid]
-        (self._nwk,) = await self._api[NetworkParameter.nwk_address]
-        (self._ext_pan_id,) = await self._api[NetworkParameter.nwk_extended_panid]
-        await self._api[NetworkParameter.channel_mask]
-        await self._api[NetworkParameter.aps_extended_panid]
-        await self._api[NetworkParameter.trust_center_address]
-        await self._api[NetworkParameter.security_mode]
-        (self._channel,) = await self._api[NetworkParameter.current_channel]
         await self._api[NetworkParameter.protocol_version]
-        (self._nwk_update_id,) = await self._api[NetworkParameter.nwk_update_id]
+        await self.load_network_info()
 
         coordinator = await DeconzDevice.new(
             self,
