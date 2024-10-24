@@ -32,6 +32,7 @@ class Gateway(zigpy.serial.SerialProtocol):
             self._api.connection_lost(exc)
 
     def close(self):
+        super().close()
         self._api = None
 
     def send(self, data: bytes) -> None:
